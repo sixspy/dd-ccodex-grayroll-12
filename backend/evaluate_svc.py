@@ -1,5 +1,13 @@
-"""在线求值：给定主体键，返回开关在某环境是否命中。"""
+"""在线求值：给定主体键，返回开关在某环境是否命中。
+
+grayroll-12：求值读口必须等更名影子原子升正后才切到新键。草案期：
+  - 旧键按正式区求值，口径零改，并挂 pending_rename 待升正标记；
+  - 未升正新键不作为正式读口，直接 404 + rename_shadow_pending，
+    杜绝“新键下读到空规则还回 200/no_official_rule”的假绿。
+"""
 from __future__ import annotations
+
+import sqlite3
 
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
@@ -18,6 +26,44 @@ class EvalIn(BaseModel):
     subject_key: str
 
 
+def _pending_rename_by_flag(conn, flag_id: int):
+    try:
+        row = conn.execute(
+            "SELECT id, old_key, new_key, path, status, created_by, created_at "
+            "FROM flag_rename_orders WHERE old_flag_id=? AND status='open' "
+            "ORDER BY id DESC LIMIT 1",
+            (flag_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if not row:
+        return None
+    d = dict(row)
+    d["order_id"] = d["id"]
+    d["promoted"] = False
+    d["confirmed"] = False
+    return d
+
+
+def _pending_rename_by_new_key(conn, new_key: str):
+    try:
+        row = conn.execute(
+            "SELECT id, old_flag_id, old_key, new_key, path, status, created_by, created_at "
+            "FROM flag_rename_orders WHERE new_key=? AND status='open' "
+            "ORDER BY id DESC LIMIT 1",
+            (new_key,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if not row:
+        return None
+    d = dict(row)
+    d["order_id"] = d["id"]
+    d["promoted"] = False
+    d["confirmed"] = False
+    return d
+
+
 @router.post("")
 def evaluate(body: EvalIn, authorization: str | None = Header(default=None)):
     current_user(authorization)
@@ -27,7 +73,19 @@ def evaluate(body: EvalIn, authorization: str | None = Header(default=None)):
     with connect() as conn:
         fl = conn.execute("SELECT * FROM flags WHERE key=?", (flag_key,)).fetchone()
         if not fl:
+            pending = _pending_rename_by_new_key(conn, flag_key)
+            if pending:
+                # 假绿关：未升正新键名下没有正式规则，绝不返回 200 空规则。
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "code": "rename_shadow_pending",
+                        "message": "该新键仅有未升正的更名影子草案，正式求值读口尚未切换",
+                        "pending_rename": pending,
+                    },
+                )
             raise HTTPException(404, detail="开关不存在")
+        pending_rename = _pending_rename_by_flag(conn, fl["id"])
         env = conn.execute("SELECT * FROM environments WHERE code=?", (env_code,)).fetchone()
         if not env:
             raise HTTPException(404, detail="环境不存在")
@@ -38,6 +96,7 @@ def evaluate(body: EvalIn, authorization: str | None = Header(default=None)):
                 "flag_key": flag_key,
                 "env_code": env_code,
                 "subject_key": subject,
+                "pending_rename": pending_rename,
             }
         if fl["status"] == "archived":
             return {
@@ -46,6 +105,7 @@ def evaluate(body: EvalIn, authorization: str | None = Header(default=None)):
                 "flag_key": flag_key,
                 "env_code": env_code,
                 "subject_key": subject,
+                "pending_rename": pending_rename,
             }
         ov = conn.execute(
             "SELECT * FROM overrides WHERE flag_id=? AND env_id=? AND subject_key=? AND active=1",
@@ -60,6 +120,7 @@ def evaluate(body: EvalIn, authorization: str | None = Header(default=None)):
                 "env_code": env_code,
                 "subject_key": subject,
                 "version": None,
+                "pending_rename": pending_rename,
             }
         rule = conn.execute(
             "SELECT * FROM flag_rules WHERE flag_id=? AND env_id=? AND official=1",
@@ -72,6 +133,7 @@ def evaluate(body: EvalIn, authorization: str | None = Header(default=None)):
                 "flag_key": flag_key,
                 "env_code": env_code,
                 "subject_key": subject,
+                "pending_rename": pending_rename,
             }
         percent_hit = eval_percent(subject, int(rule["percent"]), flag_key)
         cohort_hit = False
@@ -94,6 +156,7 @@ def evaluate(body: EvalIn, authorization: str | None = Header(default=None)):
             "flag_key": flag_key,
             "env_code": env_code,
             "subject_key": subject,
+            "pending_rename": pending_rename,
         }
 
 
@@ -119,4 +182,15 @@ def eval_board(authorization: str | None = Header(default=None)):
             dict(x)
             for x in conn.execute("SELECT status, COUNT(*) c FROM flags GROUP BY status").fetchall()
         ]
-    return {"rules": rows, "by_status": by_status}
+        pending_renames = []
+        try:
+            pending_renames = [
+                dict(x)
+                for x in conn.execute(
+                    "SELECT id, old_flag_id, old_key, new_key, status, created_by "
+                    "FROM flag_rename_orders WHERE status='open' ORDER BY id DESC"
+                ).fetchall()
+            ]
+        except sqlite3.OperationalError:
+            pending_renames = []
+    return {"rules": rows, "by_status": by_status, "pending_renames": pending_renames}

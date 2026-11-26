@@ -14,6 +14,7 @@ from dashboard_svc import router as dashboard_router
 from db import FRONTEND, PRODUCT_META, init_db
 from envs_svc import router as envs_router
 from evaluate_svc import router as evaluate_router
+from flags_svc import root_router as flags_root_router
 from flags_svc import router as flags_router
 from history_svc import router as history_router
 from kill_svc import router as kill_router
@@ -57,6 +58,8 @@ for r in (
     stubs_router,
 ):
     app.include_router(r)
+
+app.include_router(flags_root_router)
 
 
 @app.on_event("startup")

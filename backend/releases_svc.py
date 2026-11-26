@@ -16,6 +16,24 @@ from validators import require_int, require_percent, require_rule_kind, require_
 router = APIRouter(prefix="/api/releases", tags=["releases"])
 
 
+def migrate_release_flag_fk(conn, old_flag_id: int, new_flag_id: int) -> dict:
+    """grayroll-12 同票迁移：正式发布与发布影子的 flag_id 外键搬迁并联查账实。
+
+    与更名、规则外键迁移共用同一事务；调用方负责最终 commit/rollback。
+    """
+    moved: dict[str, int] = {}
+    for table in ("releases", "release_shadows"):
+        n = conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE flag_id=?", (old_flag_id,)
+        ).fetchone()[0]
+        conn.execute(
+            f"UPDATE {table} SET flag_id=? WHERE flag_id=?",
+            (new_flag_id, old_flag_id),
+        )
+        moved[table] = int(n)
+    return moved
+
+
 class PublishIn(BaseModel):
     flag_id: int
     env_id: int

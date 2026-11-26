@@ -163,6 +163,21 @@ CREATE TABLE IF NOT EXISTS contention_marks(
   winner TEXT NOT NULL,
   created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS flag_rename_orders(
+  id INTEGER PRIMARY KEY,
+  old_flag_id INTEGER NOT NULL REFERENCES flags(id),
+  old_key TEXT NOT NULL,
+  new_key TEXT NOT NULL,
+  path TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  status TEXT NOT NULL,
+  lock_key TEXT NOT NULL DEFAULT '',
+  migrated_json TEXT NOT NULL DEFAULT '{}',
+  note TEXT NOT NULL DEFAULT '',
+  created_by TEXT NOT NULL,
+  created_at REAL NOT NULL,
+  promoted_at REAL
+);
 CREATE TABLE IF NOT EXISTS rollout_schedules(
   id INTEGER PRIMARY KEY,
   flag_id INTEGER NOT NULL REFERENCES flags(id),

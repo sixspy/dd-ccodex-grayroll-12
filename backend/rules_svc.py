@@ -16,6 +16,25 @@ from validators import require_int, require_percent, require_rule_kind
 router = APIRouter(prefix="/api/rules", tags=["rules"])
 
 
+def migrate_rule_flag_fk(conn, old_flag_id: int, new_flag_id: int) -> dict:
+    """grayroll-12 同票迁移：正式规则与规则影子的 flag_id 外键搬迁并联查账实。
+
+    计数取搬迁前挂在旧身份下的行数；UPDATE 后由主事务统一提交。
+    必须与 flags.key 更名处于同一 conn/同一事务，失败整笔回滚。
+    """
+    moved: dict[str, int] = {}
+    for table in ("flag_rules", "rule_shadows"):
+        n = conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE flag_id=?", (old_flag_id,)
+        ).fetchone()[0]
+        conn.execute(
+            f"UPDATE {table} SET flag_id=? WHERE flag_id=?",
+            (new_flag_id, old_flag_id),
+        )
+        moved[table] = int(n)
+    return moved
+
+
 class ShadowBindIn(BaseModel):
     flag_id: int
     env_id: int
